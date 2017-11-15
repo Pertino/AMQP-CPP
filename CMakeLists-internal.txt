@@ -1,0 +1,10 @@
+initialize_3rdparty_project(libamqpcpp)
+
+set(CPACK_SET_DESTDIR ON)
+set(CPACK_INSTALL_PREFIX ${${PACKAGE_NAME}_DIST_CPACK_PACKAGE})
+
+set_cpack_config_defaults(${PACKAGE_NAME})
+
+create_package_cpack_config(${PACKAGE_NAME})
+
+add_package_dist_target(${PACKAGE_NAME} amqpcpp)
