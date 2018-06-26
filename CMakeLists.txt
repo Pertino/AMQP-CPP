@@ -73,19 +73,6 @@ set(cxx_base_flags "-Wall -Wshadow -D_GLIBCXX_USE_CXX11_ABI=0")
 
 add_definitions("-D_GLIBCXX_USE_CXX11_ABI=0")
 
-if(BUILD_SHARED)
-  add_library(amqpcpp SHARED ${SRCS})
-  set_target_properties(amqpcpp PROPERTIES SOVERSION 3.1)
-  install(TARGETS amqpcpp
-          LIBRARY DESTINATION lib
-  )
-else()
-  add_library(amqpcpp STATIC ${SRCS})
-  install(TARGETS amqpcpp
-          ARCHIVE DESTINATION lib
-  )
-endif()
-
 # build targets
 # ------------------------------------------------------------------------------------------------------
 
