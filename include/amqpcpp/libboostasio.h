@@ -1,7 +1,7 @@
 /**
  *  LibBoostAsio.h
  *
- *  Implementation for the AMQP::TcpHandler for boost::asio. You can use this class 
+ *  Implementation for the AMQP::TcpHandler for asio. You can use this class 
  *  instead of a AMQP::TcpHandler class, just pass the boost asio service to the 
  *  constructor and you're all set.  See tests/libboostasio.cpp for example.
  *
@@ -100,8 +100,6 @@ protected:
          */
         asio::io_service & _ioservice;
 
-        using strand_weak_ptr = std::weak_ptr<boost::asio::io_service::strand>;
-        
         /**
          *  The boost asio io_service::strand managed pointer.
          *  @var class std::shared_ptr<asio::io_service>
@@ -138,66 +136,6 @@ protected:
          *  @var _read True if read is pending else false.
          */
         bool _write_pending{false};
-
-        using handler_cb = boost::function<void(boost::system::error_code,std::size_t)>;
-        using io_handler = boost::function<void(const boost::system::error_code&, const std::size_t)>;
-
-        /**
-         * Builds a io handler callback that executes the io callback in a strand.
-         * @param  io_handler  The handler callback to dispatch
-         * @return handler_cb  A function wrapping the execution of the handler function in a io_service::strand.
-         */
-        handler_cb get_dispatch_wrapper(io_handler fn)
-        {
-            const strand_weak_ptr wpstrand = _wpstrand;
-
-            return [fn, wpstrand](const boost::system::error_code &ec, const std::size_t bytes_transferred)
-            {
-                const strand_shared_ptr strand = wpstrand.lock();
-                if (!strand)
-                {
-                    fn(boost::system::errc::make_error_code(boost::system::errc::operation_canceled), std::size_t{0});
-                    return;
-                }
-                strand->dispatch(boost::bind(fn, ec, bytes_transferred));
-            };
-        }
-        
-        /**
-         * Binds and returns a read handler for the io operation.
-         * @param  connection   The connection being watched.
-         * @param  fd           The file descripter being watched.
-         * @return handler callback
-         */
-        handler_cb get_read_handler(TcpConnection *const connection, const int fd)
-        {
-            auto fn = boost::bind(&Watcher::read_handler,
-                                  this,
-                                  _1,
-                                  _2,
-                                  PTR_FROM_THIS(Watcher),
-                                  connection,
-                                  fd);
-            return get_dispatch_wrapper(fn);
-        }
-
-        /**
-         * Binds and returns a read handler for the io operation.
-         * @param  connection   The connection being watched.
-         * @param  fd           The file descripter being watched.
-         * @return handler callback
-         */
-        handler_cb get_write_handler(TcpConnection *const connection, const int fd)
-        {
-            auto fn = boost::bind(&Watcher::write_handler,
-                                  this,
-                                  _1,
-                                  _2,
-                                  PTR_FROM_THIS(Watcher),
-                                  connection,
-                                  fd);
-            return get_dispatch_wrapper(fn);
-        }
 
         /**
          *  Handler method that is called by boost's io_service when the socket pumps a read event.
@@ -301,7 +239,7 @@ protected:
                 const std::weak_ptr<asio::io_service::strand> strand,
                 const int fd) :
             _ioservice(io_service),
-            _wpstrand(wpstrand),
+            _strand(strand),
             _socket(_ioservice)
         {
             _socket.assign(fd);
@@ -396,8 +334,6 @@ protected:
          */
         asio::io_service & _ioservice;
 
-        using strand_weak_ptr = std::weak_ptr<boost::asio::io_service::strand>;
-
         /**
          *  The boost asio io_service::strand managed pointer.
          *  @var class std::shared_ptr<asio::io_service>
@@ -409,37 +345,6 @@ protected:
          *  @var class asio::steady_timer
          */
         asio::steady_timer _timer;
-
-        using handler_fn = boost::function<void(boost::system::error_code)>;
-
-        /**
-         * Binds and returns a lamba function handler for the io operation.
-         * @param  connection   The connection being watched.
-         * @param  timeout      The file descripter being watched.
-         * @return handler callback
-         */
-        handler_fn get_handler(TcpConnection *const connection, const uint16_t timeout)
-        {
-            const auto fn = boost::bind(&Timer::timeout,
-                                  this,
-                                  _1,
-                                  PTR_FROM_THIS(Timer),
-                                  connection,
-                                  timeout);
-
-            const strand_weak_ptr wpstrand = _wpstrand;
-
-            return [fn, wpstrand](const boost::system::error_code &ec)
-            {
-                const strand_shared_ptr strand = wpstrand.lock();
-                if (!strand)
-                {
-                    fn(boost::system::errc::make_error_code(boost::system::errc::operation_canceled));
-                    return;
-                }
-                strand->dispatch(boost::bind(fn, ec));
-            };
-        }
 
         /**
          *  Callback method that is called by libev when the timer expires
@@ -557,8 +462,6 @@ protected:
      *  @var class asio::io_service&
      */
     asio::io_service & _ioservice;
-
-    using strand_shared_ptr = std::shared_ptr<boost::asio::io_service::strand>;
 
     /**
      *  The boost asio io_service::strand managed pointer.
