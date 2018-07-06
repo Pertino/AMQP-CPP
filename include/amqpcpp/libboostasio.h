@@ -1,7 +1,7 @@
 /**
  *  LibBoostAsio.h
  *
- *  Implementation for the AMQP::TcpHandler for asio. You can use this class 
+ *  Implementation for the AMQP::TcpHandler for asio. You can use this class
  *  instead of a AMQP::TcpHandler class, just pass the boost asio service to the 
  *  constructor and you're all set.  See tests/libboostasio.cpp for example.
  *
@@ -23,6 +23,7 @@
 /**
  *  Dependencies
  */
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -31,8 +32,6 @@
 #include <asio/error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/posix/stream_descriptor.hpp>
-#include <boost/bind.hpp>
-#include <boost/function.hpp>
 
 #include "amqpcpp/linux_tcp.h"
 
@@ -44,35 +43,6 @@
 #endif
 
 #define operation_canceled operation_aborted
-
-///////////////////////////////////////////////////////////////////
-#define STRAND_SOCKET_HANDLER(_fn)                                                              \
-[fn = _fn, strand = _strand](const asio::error_code &ec,                               \ 
-                             const std::size_t bytes_transferred)                               \
-{                                                                                               \
-    const std::shared_ptr<asio::io_service::strand> apStrand = strand.lock();            \
-    if (!apStrand)                                                                              \
-    {                                                                                           \
-        fn(asio::error::make_error_code(asio::error::operation_canceled),std::size_t{0}); \
-        return;                                                                                 \
-    }                                                                                           \
-                                                                                                \
-    apStrand->dispatch(std::bind(fn,ec,bytes_transferred));                                   \
-}
-
-///////////////////////////////////////////////////////////////////
-#define STRAND_TIMER_HANDLER(_fn)                                                               \
-[fn = _fn, strand = _strand](const asio::error_code &ec)                               \
-{                                                                                               \
-    const std::shared_ptr<asio::io_service::strand> apStrand = strand.lock();            \
-    if (!apStrand)                                                                              \
-    {                                                                                           \
-        fn(asio::error::make_error_code(asio::error::operation_canceled));      \
-        return;                                                                                 \
-    }                                                                                           \
-                                                                                                \
-    apStrand->dispatch(std::bind(fn,ec));                                                     \
-}
 
 /**
  *  Set up namespace
@@ -100,11 +70,13 @@ protected:
          */
         asio::io_service & _ioservice;
 
+        using strand_weak_ptr = std::weak_ptr<asio::io_service::strand>;
+
         /**
          *  The boost asio io_service::strand managed pointer.
          *  @var class std::shared_ptr<asio::io_service>
          */
-        std::weak_ptr<asio::io_service::strand> _strand;
+        strand_weak_ptr _wpstrand;
 
         /**
          *  The boost tcp socket.
@@ -123,7 +95,7 @@ protected:
          *  A boolean that indicates if the watcher has a pending read event.
          *  @var _read True if read is pending else false.
          */
-        bool _read_pending{false};
+        std::atomic<bool> _read_pending{false};
 
         /**
          *  A boolean that indicates if the watcher is monitoring for write events.
@@ -135,7 +107,87 @@ protected:
          *  A boolean that indicates if the watcher has a pending write event.
          *  @var _read True if read is pending else false.
          */
-        bool _write_pending{false};
+        std::atomic<bool> _write_pending{false};
+
+        using handler_cb = std::function<void(asio::error_code, std::size_t)>;
+
+        /**
+         * Binds and returns a read handler for the io operation.
+         * @param  connection   The connection being watched.
+         * @param  fd           The file descripter being watched.
+         * @return handler callback
+         */
+        handler_cb get_read_handler(TcpConnection *const connection, const int fd)
+        {
+            const std::weak_ptr<Watcher> awpWatcher = PTR_FROM_THIS(Watcher);
+
+            return [connection, fd, awpWatcher](const asio::error_code& ec, const std::size_t bytes_transferred)
+            {
+                const std::shared_ptr<Watcher> aWatcher = awpWatcher.lock();
+                if (!aWatcher) { return; }
+
+                const std::shared_ptr<asio::io_service::strand> strand = aWatcher->_wpstrand.lock();
+                if (!strand)
+                {
+                    aWatcher->read_handler(
+                        asio::error::make_error_code(asio::error::operation_canceled),
+                        std::size_t{0},
+                        awpWatcher,
+                        connection,
+                        fd
+                    );
+                    return;
+                }
+
+                strand->dispatch([&ec, bytes_transferred, awpWatcher, connection, fd]()
+                {
+                    const std::shared_ptr<Watcher> aWatcher = awpWatcher.lock();
+                    if (aWatcher)
+                    {
+                        aWatcher->read_handler(ec, bytes_transferred, awpWatcher, connection, fd);
+                    }
+                });
+			};
+        }
+
+        /**
+         * Binds and returns a read handler for the io operation.
+         * @param  connection   The connection being watched.
+         * @param  fd           The file descripter being watched.
+         * @return handler callback
+         */
+        handler_cb get_write_handler(TcpConnection *const connection, const int fd)
+        {
+            const std::weak_ptr<Watcher> awpWatcher = PTR_FROM_THIS(Watcher);
+
+            return [connection, fd, awpWatcher](const asio::error_code& ec, const std::size_t bytes_transferred)
+            {
+                const std::shared_ptr<Watcher> aWatcher = awpWatcher.lock();
+                if (!aWatcher) { return; }
+
+                const std::shared_ptr<asio::io_service::strand> strand = aWatcher->_wpstrand.lock();
+                if (!strand)
+                {
+                    aWatcher->write_handler(
+                        asio::error::make_error_code(asio::error::operation_canceled),
+                        std::size_t{0},
+                        awpWatcher,
+                        connection,
+                        fd
+                    );
+                    return;
+                }
+
+                strand->dispatch([&ec, bytes_transferred, awpWatcher, connection, fd]()
+				{
+                    const std::shared_ptr<Watcher> aWatcher = awpWatcher.lock();
+                    if (aWatcher)
+                    {
+                        aWatcher->write_handler(ec, bytes_transferred, awpWatcher, connection, fd);
+                    }
+                });
+            };
+        }
 
         /**
          *  Handler method that is called by boost's io_service when the socket pumps a read event.
@@ -163,22 +215,13 @@ protected:
             {
                 connection->process(fd, AMQP::readable);
 
-                _read_pending = true;
-
-                _socket.async_read_some(asio::null_buffers(),
-                                        STRAND_SOCKET_HANDLER(
-                                            std::bind(&Watcher::read_handler,
-                                            this,
-                                            std::placeholders::_1,
-                                            std::placeholders::_2,
-// C++17 has 'weak_from_this()' support.
-#if __cplusplus >= 201701L
-                                            weak_from_this(),
-#else
-                                            shared_from_this(),
-#endif
-                                            connection,
-                                            fd)));
+                bool expected = false;
+                if (_read_pending.compare_exchange_strong(expected, true))
+                {
+                    _socket.async_read_some(
+                        asio::null_buffers(),
+                        get_read_handler(connection, fd));
+                }
             }
         }
 
@@ -208,22 +251,13 @@ protected:
             {
                 connection->process(fd, AMQP::writable);
 
-                _write_pending = true;
-
-                _socket.async_write_some(asio::null_buffers(),
-                                         STRAND_SOCKET_HANDLER(
-                                             std::bind(&Watcher::write_handler,
-                                                         this,
-                                                         std::placeholders::_1,
-                                                         std::placeholders::_2,
-// C++17 has 'weak_from_this()' support.
-#if __cplusplus >= 201701L
-                                                         weak_from_this(),
-#else
-                                                         shared_from_this(),
-#endif
-                                                         connection,
-                                                         fd)));
+                bool expected = false;
+                if (_write_pending.compare_exchange_strong(expected, true))
+                {
+                    _socket.async_write_some(
+                        asio::null_buffers(),
+                        get_write_handler(connection, fd));
+                }
             }
         }
 
@@ -239,7 +273,7 @@ protected:
                 const std::weak_ptr<asio::io_service::strand> strand,
                 const int fd) :
             _ioservice(io_service),
-            _strand(strand),
+            _wpstrand(strand),
             _socket(_ioservice)
         {
             _socket.assign(fd);
@@ -274,49 +308,31 @@ protected:
             // 1. Handle reads?
             _read = ((events & AMQP::readable) != 0);
 
-            // Read requsted but no read pending?
-            if (_read && !_read_pending)
+            // Read requested but no read pending?
+            if (_read)
             {
-                _read_pending = true;
-
-                _socket.async_read_some(asio::null_buffers(),
-                                        STRAND_SOCKET_HANDLER(
-                                            std::bind(&Watcher::read_handler,
-                                                        this,
-                                                        std::placeholders::_1,
-                                                        std::placeholders::_2,
-// C++17 has 'weak_from_this()' support.
-#if __cplusplus >= 201701L
-                                                        weak_from_this(),
-#else
-                                                        shared_from_this(),
-#endif
-                                                        connection,
-                                                        fd)));
+                bool expected = false;
+                if (_read_pending.compare_exchange_strong(expected, true))
+                {
+                    _socket.async_read_some(
+                        asio::null_buffers(),
+                        get_read_handler(connection, fd));
+                }
             }
 
             // 2. Handle writes?
             _write = ((events & AMQP::writable) != 0);
 
             // Write requested but no write pending?
-            if (_write && !_write_pending)
+            if (_write)
             {
-                _write_pending = true;
-
-                _socket.async_write_some(asio::null_buffers(),
-                                         STRAND_SOCKET_HANDLER(
-                                             std::bind(&Watcher::write_handler,
-                                                         this,
-                                                         std::placeholders::_1,
-                                                         std::placeholders::_2,
-// C++17 has 'weak_from_this()' support.
-#if __cplusplus >= 201701L
-                                                         weak_from_this(),
-#else
-                                                         shared_from_this(),
-#endif
-                                                         connection,
-                                                         fd)));
+                bool expected = false;
+                if (_write_pending.compare_exchange_strong(expected, true))
+                {
+                    _socket.async_write_some(
+                        asio::null_buffers(),
+                        get_write_handler(connection, fd));
+                }
             }
         }
     };
@@ -334,17 +350,56 @@ protected:
          */
         asio::io_service & _ioservice;
 
+        using strand_weak_ptr = std::weak_ptr<asio::io_service::strand>;
+
         /**
          *  The boost asio io_service::strand managed pointer.
          *  @var class std::shared_ptr<asio::io_service>
          */
-        std::weak_ptr<asio::io_service::strand> _strand;
+        strand_weak_ptr _wpstrand;
 
         /**
          *  The boost asynchronous steady timer.
          *  @var class asio::steady_timer
          */
         asio::steady_timer _timer;
+
+        using handler_fn = std::function<void(const asio::error_code&)>;
+
+        /**
+         *  The boost asynchronous steady timer.
+         *  @var class asio::steady_timer
+         */
+        handler_fn get_handler(TcpConnection *const connection, const uint16_t timeout)
+        {
+            const std::weak_ptr<Timer> awpTimer = PTR_FROM_THIS(Timer);
+
+            return [connection, timeout, awpTimer](const asio::error_code& ec)
+            {
+                const std::shared_ptr<Timer> aTimer = awpTimer.lock();
+                if (!aTimer) { return; }
+
+                const std::shared_ptr<asio::io_service::strand> strand = aTimer->_wpstrand.lock();
+                if (!strand)
+                {
+                    aTimer->timeout(
+                        asio::error::make_error_code(asio::error::operation_canceled),
+                        awpTimer,
+                        connection,
+                        timeout
+                    );
+                    return;
+                }
+                strand->dispatch([&ec, awpTimer, connection, timeout]()
+                {
+                    const std::shared_ptr<Timer> aTimer = awpTimer.lock();
+                    if (aTimer)
+                    {
+                        aTimer->timeout(ec, awpTimer, connection, timeout);
+                    }
+                });
+            };
+        }
 
         /**
          *  Callback method that is called by libev when the timer expires
@@ -375,18 +430,7 @@ protected:
                 _timer.expires_at(_timer.expires_at() + std::chrono::seconds(timeout));
 
                 // Posts the timer event
-                _timer.async_wait(STRAND_TIMER_HANDLER(
-                                      std::bind(&Timer::timeout,
-                                                  this,
-                                                  std::placeholders::_1,
-// C++17 has 'weak_from_this()' support.
-#if __cplusplus >= 201701L
-                                                   weak_from_this(),
-#else
-                                                   shared_from_this(),
-#endif
-                                                   connection,
-                                                   timeout)));
+                _timer.async_wait(get_handler(connection, timeout));
             }
         }
 
@@ -408,7 +452,7 @@ protected:
         Timer(asio::io_service &io_service,
               const std::weak_ptr<asio::io_service::strand> strand) :
             _ioservice(io_service),
-            _strand(strand),
+            _wpstrand(strand),
             _timer(_ioservice)
         {
 
@@ -442,18 +486,7 @@ protected:
             stop();
 
             _timer.expires_from_now(std::chrono::seconds(timeout));
-            _timer.async_wait(STRAND_TIMER_HANDLER(
-                                  std::bind(&Timer::timeout,
-                                              this,
-                                              std::placeholders::_1,
-// C++17 has 'weak_from_this()' support.
-#if __cplusplus >= 201701L
-                                              weak_from_this(),
-#else
-                                              shared_from_this(),
-#endif
-                                              connection, 
-                                              timeout)));
+            _timer.async_wait(get_handler(connection, timeout));
         }
     };
 
