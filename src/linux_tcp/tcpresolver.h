@@ -32,7 +32,7 @@ namespace AMQP {
 /**
  *  Class definition
  */
-class TcpResolver : public TcpState
+class TcpResolver : public TcpExtState
 {
 private:
     /**
@@ -58,12 +58,6 @@ private:
      *  @var Pipe
      */
     Pipe _pipe;
-    
-    /**
-     *  Non-blocking socket that is connected to RabbitMQ
-     *  @var int
-     */
-    int _socket = -1;
     
     /**
      *  Possible error that occured
@@ -105,7 +99,7 @@ private:
                 _socket = socket(addresses[i]->ai_family, addresses[i]->ai_socktype, addresses[i]->ai_protocol);
                 
                 // move on on failure
-                if (_socket < -1) continue;
+                if (_socket < 0) continue;
                 
                 // connect to the socket
                 if (connect(_socket, addresses[i]->ai_addr, addresses[i]->ai_addrlen) == 0) break;
@@ -114,7 +108,7 @@ private:
                 _error = strerror(errno);
 
                 // close socket because connect failed
-                close(_socket);
+                ::close(_socket);
                     
                 // socket no longer is valid
                 _socket = -1;
@@ -144,26 +138,28 @@ private:
         }
             
         // notify the master thread by sending a byte over the pipe
-        _pipe.notify();
+        if (!_pipe.notify())
+        {
+            _error = strerror(errno);
+        }
     }
 
 public:
     /**
      *  Constructor
-     *  @param  connection  Parent connection object
+     *  @param  parent      Parent connection object
      *  @param  hostname    The hostname for the lookup
      *  @param  portnumber  The portnumber for the lookup
      *  @param  secure      Do we need a secure tls connection when ready?
-     *  @param  handler     User implemented handler object
      */
-    TcpResolver(TcpConnection *connection, const std::string &hostname, uint16_t port, bool secure, TcpHandler *handler) : 
-        TcpState(connection, handler), 
-        _hostname(hostname),
+    TcpResolver(TcpParent *parent, std::string hostname, uint16_t port, bool secure) : 
+        TcpExtState(parent), 
+        _hostname(std::move(hostname)),
         _secure(secure),
         _port(port)
     {
         // tell the event loop to monitor the filedescriptor of the pipe
-        handler->monitor(connection, _pipe.in(), readable);
+        parent->onIdle(this, _pipe.in(), readable);
         
         // we can now start the thread (must be started after filedescriptor is monitored!)
         std::thread thread(std::bind(&TcpResolver::run, this));
@@ -178,7 +174,7 @@ public:
     virtual ~TcpResolver() noexcept
     {
         // stop monitoring the pipe filedescriptor
-        _handler->monitor(_connection, _pipe.in(), 0);
+        _parent->onIdle(this, _pipe.in(), 0);
 
         // wait for the thread to be ready
         _thread.join();
@@ -196,26 +192,34 @@ public:
      */
     TcpState *proceed(const Monitor &monitor)
     {
-        // do we have a valid socket?
-        if (_socket >= 0) 
+        // prevent exceptions
+        try
         {
-            // if we need a secure connection, we move to the tls handshake
-            // @todo catch possible exception
-            if (_secure) return new SslHandshake(_connection, _socket, _hostname, std::move(_buffer), _handler);
+            // socket should be connected by now
+            if (_socket < 0) throw std::runtime_error(_error.data());
+        
+            // report that the network-layer is connected
+            _parent->onConnected(this);
+
+            // handler callback might have destroyed connection
+            if (!monitor.valid()) return nullptr;
+            
+            // if we need a secure connection, we move to the tls handshake (this could throw)
+            if (_secure) return new SslHandshake(this, std::move(_hostname), std::move(_buffer));
             
             // otherwise we have a valid regular tcp connection
-            return new TcpConnected(_connection, _socket, std::move(_buffer), _handler);
+            else return new TcpConnected(this, std::move(_buffer));
         }
-        else
+        catch (const std::runtime_error &error)
         {
             // report error
-            _handler->onError(_connection, _error.data());
+            _parent->onError(this, error.what(), false);
         
             // handler callback might have destroyed connection
             if (!monitor.valid()) return nullptr;
 
             // create dummy implementation
-            return new TcpClosed(_connection, _handler);
+            return new TcpClosed(this);
         }
     }
     
@@ -235,20 +239,6 @@ public:
         return proceed(monitor);
     }
     
-    /**
-     *  Flush state / wait for the connection to complete
-     *  @param  monitor     Object to check if connection still exists
-     *  @return             New implementation object
-     */
-    virtual TcpState *flush(const Monitor &monitor) override
-    {
-        // just wait for the other thread to be ready
-        _thread.join();
-        
-        // proceed to the next state
-        return proceed(monitor);
-    }
-
     /**
      *  Send data over the connection
      *  @param  buffer      buffer to send

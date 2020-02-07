@@ -22,27 +22,51 @@ namespace AMQP {
  *  Forward declarations
  */
 class TcpState;
+class TcpChannel;
 
 /**
  *  Class definition
  */
 class TcpConnection :
     private ConnectionHandler,
-    private Watchable
+    private Watchable,
+    private TcpParent
 {
 private:
+    /**
+     *  User-space handler object
+     *  @var    TcpHandler
+     */
+    TcpHandler *_handler;
+
     /**
      *  The state of the TCP connection - this state objecs changes based on 
      *  the state of the connection (resolving, connected or closed)
      *  @var    std::unique_ptr<TcpState>
      */
-    std::shared_ptr<TcpState> _state;
+    std::unique_ptr<TcpState> _state;
 
     /**
      *  The underlying AMQP connection
      *  @var    Connection
      */
     Connection _connection;
+
+    /**
+     *  The channel may access out _connection
+     *  @friend
+     */
+    friend TcpChannel;
+    
+
+    /**
+     *  Method that is called when the RabbitMQ server and your client application  
+     *  exchange some properties that describe their identity.
+     *  @param  connection      The connection about which information is exchanged
+     *  @param  server          Properties sent by the server
+     *  @param  client          Properties that are to be sent back
+     */
+    virtual void onProperties(Connection *connection, const Table &server, Table &client) override;
 
     /**
      *  Method that is called when the heartbeat frequency is negotiated.
@@ -64,7 +88,11 @@ private:
      *  Method that is called when the server sends a heartbeat to the client
      *  @param  connection      The connection over which the heartbeat was received
      */
-    virtual void onHeartbeat(Connection *connection) override;
+    virtual void onHeartbeat(Connection *connection) override
+    {
+        // pass on to tcp handler
+        _handler->onHeartbeat(this);
+    }
 
     /**
      *  Method called when the connection ends up in an error state
@@ -74,35 +102,91 @@ private:
     virtual void onError(Connection *connection, const char *message) override;
 
     /**
-     *  Method that is called when the connection is established
+     *  Method that is called when the AMQP connection is established
      *  @param  connection      The connection that can now be used
      */
-    virtual void onConnected(Connection *connection) override;
+    virtual void onReady(Connection *connection) override
+    {
+        // pass on to the handler
+        _handler->onReady(this);
+    }
 
     /**
      *  Method that is called when the connection was closed.
      *  @param  connection      The connection that was closed and that is now unusable
      */
     virtual void onClosed(Connection *connection) override;
-
+    
     /**
-     *  Parse a buffer that was received
-     *  @param  buffer
+     *  Method that is called when the tcp connection has been established
+     *  @param  state
      */
-    uint64_t parse(const Buffer &buffer)
+    virtual void onConnected(TcpState *state) override
     {
-        // pass to the AMQP connection
-        return _connection.parse(buffer);
+        // pass on to the handler
+        _handler->onConnected(this);
     }
 
     /**
-     *  Classes that have access to private data
+     *  Method that is called when the connection is secured
+     *  @param  state
+     *  @param  ssl
+     *  @return bool
      */
-    friend class SslConnected;
-    friend class TcpConnected;
-    friend class TcpChannel;
+    virtual bool onSecured(TcpState *state, const SSL *ssl) override
+    {
+        // pass on to user-space
+        return _handler->onSecured(this, ssl);
+    }
 
+    /**
+     *  Method to be called when data was received
+     *  @param  state
+     *  @param  buffer
+     *  @return size_t
+     */
+    virtual size_t onReceived(TcpState *state, const Buffer &buffer) override
+    {
+        // pass on to the connection
+        return _connection.parse(buffer);
+    }
     
+    /**
+     *  Method to be called when we need to monitor a different filedescriptor
+     *  @param  state
+     *  @param  fd
+     *  @param  events
+     */
+    virtual void onIdle(TcpState *state, int socket, int events) override
+    {
+        // pass on to user-space
+        return _handler->monitor(this, socket, events);
+    }
+
+    /**
+     *  Method that is called when an error occurs (the connection is lost)
+     *  @param  state
+     *  @param  error
+     *  @param  connected
+     */
+    virtual void onError(TcpState *state, const char *message, bool connected) override;
+
+    /**
+     *  Method to be called when it is detected that the connection was lost
+     *  @param  state
+     */
+    virtual void onLost(TcpState *state) override;
+    
+    /**
+     *  The expected number of bytes
+     *  @return size_t
+     */
+    virtual size_t expected() override
+    {
+        // pass on to the connection
+        return _connection.expected();
+    }
+
 public:
     /**
      *  Constructor
@@ -110,6 +194,12 @@ public:
      *  @param  hostname        The address to connect to
      */
     TcpConnection(TcpHandler *handler, const Address &address);
+    
+    /**
+     *  No copying
+     *  @param  that
+     */
+    TcpConnection(const TcpConnection &that) = delete;
     
     /**
      *  Destructor
@@ -136,24 +226,42 @@ public:
     void process(int fd, int flags);
     
     /**
-     *  Flush the connection - all unsent bytes are sent to the socket rigth away
-     *  This is a blocking operation. The connection object normally only sends data
-     *  when the socket is known to be writable, but with this method you can force
-     *  the outgoing buffer to be fushed
-     */
-    void flush();
-    
-    /**
-     *  Close the connection
-     *  This closes all channels and the TCP connection
+     *  Close the connection in an elegant fashion. This closes all channels and the 
+     *  TCP connection. Note that the connection is not immediately closed: first all
+     *  pending operations are completed, and then an AMQP closing-handshake is
+     *  performed. If you pass a parameter "immediate=true" the connection is 
+     *  immediately closed, without waiting for earlier commands (and your handler's
+     *  onError() method is called about the premature close)
      *  @return bool
      */
-    bool close()
+    bool close(bool immediate = false);
+    
+    /**
+     *  Is the connection connected, meaning: it has passed the login handshake?
+     *  @return bool
+     */
+    bool ready() const
     {
-        // pass to the underlying connection
-        return _connection.close();
+        return _connection.ready();
     }
-
+    
+    /**
+     *  Is the connection in a usable state / not yet closed or being closed
+     *  When a connection is usable, you can send further commands over it. When it is
+     *  unusable, it may still be connected and finished queued commands.
+     *  @return bool
+     */
+    bool usable() const
+    {
+        return _connection.usable();
+    }
+    
+    /**
+     *  Is the connection closed and full dead? The entire TCP connection has been discarded.
+     *  @return bool
+     */
+    bool closed() const;
+    
     /**
      *  The max frame size. Useful if you set up a buffer to parse incoming data: it does not have to exceed this size.
      *  @return uint32_t
@@ -178,7 +286,7 @@ public:
       */
     std::size_t channels() const
     {
-        // return the amount of channels this connection has
+        // return the number of channels this connection has
         return _connection.channels();
     }
 

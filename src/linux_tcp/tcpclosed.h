@@ -4,7 +4,7 @@
  *  Class that is used when the TCP connection ends up in a closed state
  *
  *  @author Emiel Bruijntjes <emiel.bruijntjes@copernica.com>
- *  @copyright 2015 - 2016 Copernica BV
+ *  @copyright 2015 - 2018 Copernica BV
  */
 
 /**
@@ -25,11 +25,10 @@ class TcpClosed : public TcpState
 public:
     /**
      *  Constructor
-     *  @param  connection  The parent TcpConnection object
-     *  @param  handler     User supplied handler
+     *  @param  parent      The parent object
      */
-    TcpClosed(TcpConnection *connection, TcpHandler *handler) : 
-        TcpState(connection, handler) {}
+    TcpClosed(TcpParent *parent) : 
+        TcpState(parent) {}
 
     /**
      *  Constructor
@@ -42,6 +41,12 @@ public:
      *  Destructor
      */
     virtual ~TcpClosed() noexcept = default;
+
+    /**
+     *  Is this a closed / dead state?
+     *  @return bool
+     */
+    virtual bool closed() const override { return true; }
 };
     
 /**

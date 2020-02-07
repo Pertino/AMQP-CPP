@@ -27,9 +27,12 @@ public:
      *  Constructor
      * 
      *  The passed in connection pointer must remain valid for the 
-     *  lifetime of the channel.
+     *  lifetime of the channel. A constructor is thrown if the channel 
+     *  cannot be connected (because the connection is already closed or
+     *  because max number of channels has been reached)
      * 
      *  @param  connection
+     *  @throws std::runtime_error
      */
     TcpChannel(TcpConnection *connection) :
         Channel(&connection->_connection) {}
@@ -38,6 +41,18 @@ public:
      *  Destructor
      */
     virtual ~TcpChannel() {}
+
+    /**
+     *  Copying is not allowed.
+     *  @param  other
+     */
+    TcpChannel(const TcpChannel &other) = delete;
+
+    /**
+     *  But movement is allowed
+     *  @param  other
+     */
+    TcpChannel(TcpChannel &&other) = default;
 };
 
 /**

@@ -71,8 +71,8 @@ void ChannelImpl::onError(const ErrorCallback &callback)
     // store callback
     _errorCallback = callback;
 
-    // if the channel is connected, all is ok
-    if (connected()) return;
+    // if the channel is usable, all is ok
+    if (usable()) return;
     
     // is the channel closing down?
     if (_state == state_closing) return callback("Channel is closing down");
@@ -81,7 +81,7 @@ void ChannelImpl::onError(const ErrorCallback &callback)
     if (_connection == nullptr) return callback("Channel is not linked to a connection");
     
     // if the connection is valid, this is a pure channel error
-    if (_connection->connected()) return callback("Channel is in an error state, but the connection is valid");
+    if (_connection->ready()) return callback("Channel is in an error state, but the connection is valid");
 
     // the connection is closing down
     if (_connection->closing()) return callback("Channel is in an error state, the AMQP connection is closing down");
@@ -96,8 +96,9 @@ void ChannelImpl::onError(const ErrorCallback &callback)
 /**
  *  Initialize the object with an connection
  *  @param  connection
+ *  @return bool
  */
-void ChannelImpl::attach(Connection *connection)
+bool ChannelImpl::attach(Connection *connection)
 {
     // get connection impl
     _connection = &connection->_implementation;
@@ -110,6 +111,9 @@ void ChannelImpl::attach(Connection *connection)
     {
         // this is invalid
         _state = state_closed;
+        
+        // failure
+        return false;
     }
     else 
     {
@@ -117,10 +121,13 @@ void ChannelImpl::attach(Connection *connection)
         _state = state_connected;
     
         // send the open frame
-        if (send(ChannelOpenFrame(_id))) return;
+        if (send(ChannelOpenFrame(_id))) return true;
 
-        // report an error
-        reportError("Channel could not be initialized", true);
+        // this is an error
+        _state = state_closed;
+        
+        // report failure
+        return false;
     }
 }    
 
@@ -246,8 +253,8 @@ Deferred &ChannelImpl::rollbackTransaction()
  */
 Deferred &ChannelImpl::close()
 {
-    // this is completely pointless if not connected
-    if (!connected()) return push(std::make_shared<Deferred>(_state == state_closing));
+    // this is completely pointless if already closed
+    if (!usable()) return push(std::make_shared<Deferred>(_state == state_closing));
     
     // send a channel close frame
     auto &handler = push(ChannelCloseFrame(_id));
@@ -283,11 +290,11 @@ Deferred &ChannelImpl::declareExchange(const std::string &name, ExchangeType typ
     else if (type == ExchangeType::consistent_hash) exchangeType = "x-consistent-hash";
 
     // the boolean options
-    bool passive = flags & AMQP::passive;
-    bool durable = flags & AMQP::durable;
-    bool autodelete = flags & AMQP::autodelete;
-    bool internal = flags & AMQP::internal;
-    bool nowait = flags & AMQP::nowait;
+    bool passive = (flags & AMQP::passive) != 0;
+    bool durable = (flags & AMQP::durable) != 0;
+    bool autodelete = (flags & AMQP::autodelete) != 0;
+    bool internal = (flags & AMQP::internal) != 0;
+    bool nowait = (flags & AMQP::nowait) != 0;
 
     // send declare exchange frame
     return push(ExchangeDeclareFrame(_id, name, exchangeType, passive, durable, autodelete, internal, nowait, arguments));
@@ -747,7 +754,7 @@ bool ChannelImpl::send(const Frame &frame)
  *  Signal the channel that a synchronous operation was completed. After 
  *  this operation, waiting frames can be sent out.
  */
-void ChannelImpl::onSynchronized()
+void ChannelImpl::flush()
 {
     // we are no longer waiting for synchronous operations
     _synchronous = false;
@@ -839,6 +846,7 @@ void ChannelImpl::reportError(const char *message, bool notifyhandler)
     // the connection no longer has to know that this channel exists,
     // because the channel ID is no longer in use
     if (_connection) _connection->remove(this);
+    _connection = nullptr;
 }
 
 /**

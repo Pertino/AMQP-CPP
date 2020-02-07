@@ -181,6 +181,64 @@ uint64_t ConnectionImpl::parse(const Buffer &buffer)
 }
 
 /**
+ *  Fail all open channels, helper method
+ *  @param  monitor     object to check if object still exists
+ *  @param  message     error message
+ *  @return bool        does the object still exist?
+ */
+bool ConnectionImpl::fail(const Monitor &monitor, const char *message)
+{
+    // all deferred result objects in the channels should report this error too
+    while (!_channels.empty())
+    {
+        // report the errors
+        _channels.begin()->second->reportError(message);
+
+        // leap out if no longer valid
+        if (!monitor.valid()) return false;
+    }
+
+    // done
+    return true;
+}
+
+/**
+ *  Fail the connection / report that the connection is lost
+ *  @param  message
+ *  @return bool
+ */
+bool ConnectionImpl::fail(const char *message)
+{
+    // if already closed
+    if (_state == state_closed) return false;
+    
+    // from now on we consider the connection to be closed
+    _state = state_closed;
+
+    // monitor because every callback could invalidate the connection
+    fail(Monitor(this), message);
+
+    // done
+    return true;
+}
+
+/**
+ *  Report an error to user-space
+ *  @param  message     the error message
+ */
+void ConnectionImpl::reportError(const char *message)
+{
+    // monitor because every callback could invalidate the connection
+    Monitor monitor(this);
+
+    // fail all operations
+    if (!fail(monitor, message)) return;
+
+    // inform handler
+    _handler->onError(_parent, message);
+}
+
+/**
  *  Close the connection
  *  This will close all channels
  *  @return bool
@@ -188,7 +246,7 @@ uint64_t ConnectionImpl::parse(const Buffer &buffer)
 bool ConnectionImpl::close()
 {
     // leap out if already closed or closing
-    if (_closed) return false;
+    if (_closed || _state == state_closed) return false;
 
     // mark that the object is closed
     _closed = true;
@@ -248,7 +306,7 @@ bool ConnectionImpl::sendClose()
 /**
  *  Mark the connection as connected
  */
-void ConnectionImpl::setConnected()
+void ConnectionImpl::setReady()
 {
     // store connected state
     _state = state_connected;
@@ -258,7 +316,7 @@ void ConnectionImpl::setConnected()
     Monitor monitor(this);
 
     // inform handler
-    _handler->onConnected(_parent);
+    _handler->onReady(_parent);
     
     // the handler could have destructed us
     if (!monitor.valid()) return;
@@ -269,9 +327,6 @@ void ConnectionImpl::setConnected()
         // get the next message
         const auto &buffer = _queue.front();
         
-        // data is going to be sent, thus connection is not idle
-        _idle = false;
-
         // send it
         _handler->onData(_parent, buffer.data(), buffer.size());
         
@@ -339,9 +394,6 @@ bool ConnectionImpl::send(const Frame &frame)
     // are we still setting up the connection?
     if ((_state == state_connected && _queue.empty()) || frame.partOfHandshake())
     {
-        // the data will be sent, so connection is not idle
-        _idle = false;
-        
         // we need an output buffer (this will immediately send the data)
         PassthroughBuffer buffer(_parent, _handler, frame);
     }
@@ -368,9 +420,6 @@ bool ConnectionImpl::send(CopiedBuffer &&buffer)
     // are we waiting for other frames to be sent before us?
     if (_queue.empty())
     {
-        // data will be sent, thus connection is not empty
-        _idle = false;
-        
         // send it directly
         _handler->onData(_parent, buffer.data(), buffer.size());
     }
@@ -386,20 +435,12 @@ bool ConnectionImpl::send(CopiedBuffer &&buffer)
 
 /**
  *  Send a ping / heartbeat frame to keep the connection alive
- *  @param  force       also send heartbeat if connection is not idle
  *  @return bool
  */
-bool ConnectionImpl::heartbeat(bool force)
+bool ConnectionImpl::heartbeat()
 {
-    // do nothing if the connection is not idle (but we do reset the idle state to ensure
-    // that the next heartbeat will be sent if nothing is going to change from now on)
-    if (!force && !_idle) return _idle = true;
-    
     // send a frame
-    if (!send(HeartbeatFrame())) return false;
-    
-    // frame has been sent, we treat the connection as idle now until some other data is sent over it
-    return _idle = true;
+    return send(HeartbeatFrame());
 }
 
 /**

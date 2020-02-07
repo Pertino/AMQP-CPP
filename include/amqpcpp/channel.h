@@ -22,7 +22,7 @@ class Channel
 private:
     /**
      *  The implementation for the channel
-     *  @var    ChannelImpl
+     *  @var    std::unique_ptr<ChannelImpl>
      */
     std::shared_ptr<ChannelImpl> _implementation;
 
@@ -31,21 +31,26 @@ public:
      *  Construct a channel object
      * 
      *  The passed in connection pointer must remain valid for the 
-     *  lifetime of the channel.
+     *  lifetime of the channel. Watch out: this method throws an error
+     *  if the channel could not be constructed (for example because the
+     *  max number of AMQP channels has been reached)
      * 
      *  @param  connection
+     *  @throws std::runtime_error
      */
-    Channel(Connection *connection) : _implementation(new ChannelImpl()) 
-    {
-        // attach the connection to the channel
-        _implementation->attach(connection);
-    }
+    Channel(Connection *connection);
     
     /**
      *  Copy'ing of channel objects is not supported
      *  @param  channel
      */
     Channel(const Channel &channel) = delete;
+
+    /**
+     *  But movement _is_ allowed
+     *  @param  channel
+     */
+    Channel(Channel &&channel) : _implementation(std::move(channel._implementation)) {}
 
     /**
      *  Destructor
@@ -119,12 +124,23 @@ public:
     }
 
     /**
-     *  Is the channel connected?
+     *  Is the channel usable / not yet closed?
      *  @return bool
      */
-    bool connected()
+    bool usable() const
     {
-        return _implementation->connected();
+        return _implementation->usable();
+    }
+    
+    /**
+     *  Is the channel connected?
+     *  This method is deprecated: use Channel::usable()
+     *  @return bool
+     *  @deprecated
+     */
+    bool connected() const
+    {
+        return usable();
     }
 
     /**
