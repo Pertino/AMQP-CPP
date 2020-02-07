@@ -74,7 +74,7 @@
 
 #define htobe64(x) ((1==htonl(1)) ? (x) : ((uint64_t)htonl((x) & 0xFFFFFFFF) << 32) | htonl((x) >> 32))
 #define htole64(x) (x)
-#define be64toh(x) ntohll(x)
+#define be64toh(x) ((1==ntohl(1)) ? (x) : ((uint64_t)ntohl((x) & 0xFFFFFFFF) << 32) | ntohl((x) >> 32))
 #define le64toh(x) (x)
 
 #elif BYTE_ORDER == BIG_ENDIAN
@@ -125,6 +125,13 @@
 #define le32toh(x) letoh32(x)
 #define be64toh(x) betoh64(x)
 #define le64toh(x) letoh64(x)
+
+/**
+ * FreeBSD handling
+ */
+#elif defined(__FreeBSD__)
+
+#include <sys/endian.h>
 
 /**
  *  Not on apple, and not on windows

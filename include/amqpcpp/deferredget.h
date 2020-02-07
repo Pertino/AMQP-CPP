@@ -38,9 +38,9 @@ private:
 
     /**
      *  Callback with the number of messages still in the queue
-     *  @var    SizeCallback
+     *  @var    CountCallback
      */
-    SizeCallback _countCallback;
+    CountCallback _countCallback;
 
     /**
      *  Report success for a get operation
@@ -103,6 +103,19 @@ public:
         // allow chaining
         return *this;
     }
+    
+    /**
+     *  Register a function to be called when an error occurs. This should be defined, otherwise the base methods are used.
+     *  @param  callback
+     */
+    DeferredGet &onError(const ErrorCallback &callback)
+    {
+        // store the callback
+        _errorCallback = callback;
+
+        // allow chaining
+        return *this;
+    }
 
     /**
      *  Register a function to be called when a message arrives
@@ -149,7 +162,7 @@ public:
      *  Register a function to be called when queue size information is known
      *  @param  callback    the callback to execute
      */
-    DeferredGet &onCount(const SizeCallback &callback)
+    DeferredGet &onCount(const CountCallback &callback)
     {
         // store callback
         _countCallback = callback;

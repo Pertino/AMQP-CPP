@@ -5,7 +5,7 @@
  *  constructed by the connection class itselves and that has all sorts of
  *  methods that are only useful inside the library
  *
- *  @copyright 2014 Copernica BV
+ *  @copyright 2014 - 2018 Copernica BV
  */
 
 /**
@@ -70,7 +70,8 @@ protected:
     } _state = state_protocol;
 
     /**
-     *  Has the close() method been called?
+     *  Has the close() method been called? If this is true, we automatically
+     *  send a close-frame after all pending operations are finsihed.
      *  @var    bool
      */
     bool _closed = false;
@@ -125,12 +126,6 @@ protected:
     std::queue<CopiedBuffer> _queue;
     
     /**
-     *  Is the connection idle (meaning: a heartbeat is necessary)
-     *  @var    bool
-     */
-    bool _idle = true;
-
-    /**
      *  Helper method to send the close frame
      *  Return value tells if the connection is still valid
      *  @return bool
@@ -148,6 +143,14 @@ protected:
      *  @return bool
      */
     bool waiting() const;
+    
+    /**
+     *  Helper method for the fail() method
+     *  @param  monitor
+     *  @param  message
+     *  @return bool
+     */
+    bool fail(const Monitor &monitor, const char *message);
 
 private:
     /**
@@ -196,18 +199,30 @@ public:
 
     /**
      *  Mark the protocol as being ok
+     *  @param  server      properties sent by the server
+     *  @param  client      properties to be send back
      */
-    void setProtocolOk()
+    void setProtocolOk(const Table &server, Table &client)
     {
+        // if object is destructed
+        Monitor monitor(this);
+        
+        // check if user-space wants to set these properties
+        _handler->onProperties(_parent, server, client);
+        
+        // leap out if userspace destructed the object
+        if (!monitor.valid()) return;
+
         // move on to handshake state
         if (_state == state_protocol) _state = state_handshake;
     }
 
     /**
-     *  Are we fully connected?
+     *  Are we fully connected and ready for instructions? This is true after the initial
+     *  protocol and login handshake were completed.
      *  @return bool
      */
-    bool connected() const
+    bool ready() const
     {
         // state must be connected
         return _state == state_connected;
@@ -232,11 +247,20 @@ public:
         // state must be connected
         return _state == state_closed;
     }
+    
+    /**
+     *  Is the connection in a usable state / not yet closed?
+     *  @return bool
+     */
+    bool usable() const
+    {
+        return (_state == state_protocol || _state == state_handshake || _state == state_connected) && !_closed;
+    }
 
     /**
-     *  Mark the connection as connected
+     *  Mark the connection as ready
      */
-    void setConnected();
+    void setReady();
 
     /**
      *  Retrieve the login data
@@ -327,8 +351,17 @@ public:
     uint64_t parse(const Buffer &buffer);
 
     /**
+     *  Fail all pending - this can be called by user-space when it is recognized that the 
+     *  underlying connection is lost. All error-handlers for all operations and open
+     *  channels will be called. This will _not_ call ConnectionHandler::onError() method.
+     *  
+     *  @return bool
+     */
+    bool fail(const char *message);
+
+    /**
      *  Close the connection
-     *  This will close all channels
+     *  This will also close all channels
      *  @return bool
      */
     bool close();
@@ -370,27 +403,7 @@ public:
      *  Report an error message
      *  @param  message
      */
-    void reportError(const char *message)
-    {
-        // set connection state to closed
-        _state = state_closed;
-
-        // monitor because every callback could invalidate the connection
-        Monitor monitor(this);
-
-        // all deferred result objects in the channels should report this error too
-        while (!_channels.empty())
-        {
-            // report the errors
-            _channels.begin()->second->reportError(message, false);
-
-            // leap out if no longer valid
-            if (!monitor.valid()) return;
-        }
-
-        // inform handler
-        _handler->onError(_parent, message);
-    }
+    void reportError(const char *message);
 
     /**
      *  Report that the connection is closed
@@ -414,9 +427,9 @@ public:
     }
 
     /**
-     *  Set the heartbeat delay
-     *  @param  heartbeat       suggested heartbeat by server
-     *  @return uint16_t        accepted heartbeat by client
+     *  Set the heartbeat timeout
+     *  @param  heartbeat       suggested heartbeat timeout by server
+     *  @return uint16_t        accepted heartbeat timeout from client
      */
     uint16_t setHeartbeat(uint16_t heartbeat)
     {
@@ -435,11 +448,9 @@ public:
     
     /**
      *  Send a heartbeat to keep the connection alive
-     *  By default, this function does nothing if the connection is not in an idle state
-     *  @param  force           always send the heartbeat, even if the connection is not idle
      *  @return bool
      */
-    bool heartbeat(bool force=false);
+    bool heartbeat();
 
     /**
      *  The actual connection is a friend and can construct this class

@@ -37,6 +37,7 @@ matrix:
       - CXXFLAGS=-std=c++11
 
   - os: linux
+    compiler: gcc
     env:
       - COMPILER_PACKAGE=g++-6
       - C_COMPILER=gcc-6
@@ -48,6 +49,13 @@ matrix:
       - COMPILER_PACKAGE=g++-7
       - C_COMPILER=gcc-7
       - CXX_COMPILER=g++-7
+      
+  - os: linux
+    compiler: gcc
+    env:
+      - COMPILER_PACKAGE=g++-8
+      - C_COMPILER=gcc-8
+      - CXX_COMPILER=g++-8
 
   ################
   # Linux / Clang
@@ -64,6 +72,12 @@ matrix:
       - COMPILER_PACKAGE=clang-5.0
       - C_COMPILER=clang-5.0
       - CXX_COMPILER=clang++-5.0
+      
+  - os: linux
+    env:
+      - COMPILER_PACKAGE=clang-6.0
+      - C_COMPILER=clang-6.0
+      - CXX_COMPILER=clang++-6.0
 
 before_install:
 
@@ -71,7 +85,7 @@ before_install:
   - uname -a
 
   # Use an artful container - gives us access to latest compilers.
-  - docker run -d --name ubuntu-test-container -v $(pwd):/travis ubuntu:artful tail -f /dev/null
+  - docker run -d --name ubuntu-test-container -v $(pwd):/travis ubuntu:bionic tail -f /dev/null
   - docker ps
 
 
@@ -80,7 +94,7 @@ install:
   # Create our container
   - docker exec -t ubuntu-test-container bash -c "apt-get update -y &&
     apt-get --no-install-recommends install -y software-properties-common cmake
-    ninja-build libboost-all-dev libev-dev libuv1-dev ninja-build $COMPILER_PACKAGE &&
+    ninja-build libboost-all-dev libev-dev libuv1-dev ninja-build libssl-dev $COMPILER_PACKAGE &&
     apt-get -y clean && rm -rf /var/lib/apt/lists/*"
 
 ################
@@ -94,6 +108,6 @@ script:
     export CC=/usr/bin/$C_COMPILER &&
     export CXX=/usr/bin/$CXX_COMPILER &&
     mkdir build.release && cd build.release &&
-    cmake ${CMAKE_OPTIONS} -DAMQP-CPP_BUILD_EXAMPLES=ON -DAMQP-CPP_LINUX_TCP=ON -GNinja .. &&
-    cmake --config Release --build . &&
+    cmake ${CMAKE_OPTIONS} -DAMQP-CPP_BUILD_EXAMPLES=ON -DAMQP-CPP_LINUX_TCP=ON --config Release -GNinja .. &&
+    cmake --build . &&
     cd .."
